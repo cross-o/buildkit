@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	fuseoverlayfs "github.com/AkihiroSuda/containerd-fuse-overlayfs"
 	"github.com/BurntSushi/toml"
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	"github.com/containerd/containerd/defaults"
@@ -19,8 +18,10 @@ import (
 	ctdsnapshot "github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/native"
 	"github.com/containerd/containerd/snapshots/overlay"
+	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
 	snproxy "github.com/containerd/containerd/snapshots/proxy"
 	"github.com/containerd/containerd/sys"
+	fuseoverlayfs "github.com/containerd/fuse-overlayfs-snapshotter"
 	sgzfs "github.com/containerd/stargz-snapshotter/fs"
 	sgzconf "github.com/containerd/stargz-snapshotter/fs/config"
 	sgzsource "github.com/containerd/stargz-snapshotter/fs/source"
@@ -95,6 +96,10 @@ func init() {
 			Name:  "oci-worker-binary",
 			Usage: "name of specified oci worker binary",
 			Value: defaultConf.Workers.OCI.Binary,
+		},
+		cli.StringFlag{
+			Name:  "oci-worker-apparmor-profile",
+			Usage: "set the name of the apparmor profile applied to containers",
 		},
 	}
 	n := "oci-worker-rootless"
@@ -215,6 +220,9 @@ func applyOCIFlags(c *cli.Context, cfg *config.Config) error {
 	if c.GlobalIsSet("oci-worker-proxy-snapshotter-path") {
 		cfg.Workers.OCI.ProxySnapshotterPath = c.GlobalString("oci-worker-proxy-snapshotter-path")
 	}
+	if c.GlobalIsSet("oci-worker-apparmor-profile") {
+		cfg.Workers.OCI.ApparmorProfile = c.GlobalString("oci-worker-apparmor-profile")
+	}
 	return nil
 }
 
@@ -268,7 +276,7 @@ func ociWorkerInitializer(c *cli.Context, common workerInitializerOpt) ([]worker
 		},
 	}
 
-	opt, err := runc.NewWorkerOpt(common.config.Root, snFactory, cfg.Rootless, processMode, cfg.Labels, idmapping, nc, dns, cfg.Binary)
+	opt, err := runc.NewWorkerOpt(common.config.Root, snFactory, cfg.Rootless, processMode, cfg.Labels, idmapping, nc, dns, cfg.Binary, cfg.ApparmorProfile)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +332,7 @@ func snapshotterFactory(commonRoot string, cfg config.OCIConfig, hosts docker.Re
 	}
 
 	if name == "auto" {
-		if err := overlay.Supported(commonRoot); err == nil {
+		if err := overlayutils.Supported(commonRoot); err == nil {
 			name = "overlayfs"
 		} else {
 			logrus.Debugf("auto snapshotter: overlayfs is not available for %s, trying fuse-overlayfs: %v", commonRoot, err)

@@ -138,7 +138,7 @@ func (p dockerPusher) Push(ctx context.Context, desc ocispec.Descriptor) (conten
 			//
 			// for the private repo, we should remove mount-from
 			// query and send the request again.
-			resp, err = preq.do(pctx)
+			resp, err = preq.doWithRetries(pctx, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -238,7 +238,7 @@ func (p dockerPusher) Push(ctx context.Context, desc ocispec.Descriptor) (conten
 
 	go func() {
 		defer close(respC)
-		resp, err := req.do(ctx)
+		resp, err := req.doWithRetries(ctx, nil)
 		if err != nil {
 			respC <- response{err: err}
 			pr.CloseWithError(err)
@@ -354,7 +354,7 @@ func (pw *pushWriter) Commit(ctx context.Context, size int64, expected digest.Di
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusNoContent, http.StatusAccepted:
 	default:
-		return errors.Errorf("unexpected status: %s", resp.Status)
+		return remoteserrors.NewUnexpectedStatusErr(resp.Response)
 	}
 
 	status, err := pw.tracker.GetStatus(pw.ref)
