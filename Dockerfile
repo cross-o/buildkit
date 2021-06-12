@@ -1,17 +1,17 @@
 # syntax = docker/dockerfile:1.2
 
-ARG RUNC_VERSION=v1.0.0-rc93
-ARG CONTAINERD_VERSION=v1.4.2
-# containerd v1.3 for integration tests
-ARG CONTAINERD_ALT_VERSION=v1.3.7
+ARG RUNC_VERSION=v1.0.0-rc95
+ARG CONTAINERD_VERSION=v1.5.2
+# containerd v1.4 for integration tests
+ARG CONTAINERD_ALT_VERSION=v1.4.6
 # available targets: buildkitd, buildkitd.oci_only, buildkitd.containerd_only
 ARG BUILDKIT_TARGET=buildkitd
 ARG REGISTRY_VERSION=2.7.1
-ARG ROOTLESSKIT_VERSION=v0.11.1
-ARG CNI_VERSION=v0.8.7
+ARG ROOTLESSKIT_VERSION=v0.14.2
+ARG CNI_VERSION=v0.9.1
 ARG SHADOW_VERSION=4.8.1
-ARG FUSEOVERLAYFS_VERSION=v1.3.0
-ARG STARGZ_SNAPSHOTTER_VERSION=v0.4.1
+ARG FUSEOVERLAYFS_VERSION=v1.5.0
+ARG STARGZ_SNAPSHOTTER_VERSION=v0.5.0
 
 ARG ALPINE_VERSION=3.12
 
@@ -20,12 +20,11 @@ FROM --platform=$BUILDPLATFORM alpine:${ALPINE_VERSION} AS git
 RUN apk add --no-cache git
 
 # xx is a helper for cross-compilation
-FROM --platform=$BUILDPLATFORM tonistiigi/xx:golang@sha256:810dc54d5144f133a218e88e319184bf8b9ce01d37d46ddb37573e90decd9eef AS xx
+FROM --platform=$BUILDPLATFORM tonistiigi/xx@sha256:810dc54d5144f133a218e88e319184bf8b9ce01d37d46ddb37573e90decd9eef AS xx
 
-FROM --platform=$BUILDPLATFORM golang:1.13-alpine AS gostable
 FROM --platform=$BUILDPLATFORM golang:1.16-alpine AS golatest
 
-FROM gostable AS go-linux
+FROM golatest AS go-linux
 FROM golatest AS go-darwin
 FROM golatest AS go-windows-amd64
 FROM golatest AS go-windows-386
@@ -51,7 +50,7 @@ WORKDIR $GOPATH/src/github.com/opencontainers/runc
 ARG TARGETPLATFORM
 # gcc is only installed for libgcc
 # lld has issues building static binaries for ppc so prefer ld for it
-RUN set -e; xx-apk add musl-dev gcc libseccomp-dev; \
+RUN set -e; xx-apk add musl-dev gcc libseccomp-dev libseccomp-static; \
   [ "$(xx-info arch)" != "ppc64le" ] || XX_CC_PREFER_LINKER=ld xx-clang --setup-target-triple
 RUN --mount=from=runc-src,src=/usr/src/runc,target=. --mount=target=/root/.cache,type=cache \
   CGO_ENABLED=1 xx-go build -mod=vendor -ldflags '-extldflags -static' -tags 'apparmor seccomp netgo cgo static_build osusergo' -o /usr/bin/runc ./ && \
@@ -120,7 +119,7 @@ FROM alpine:${ALPINE_VERSION} AS buildkit-export
 # nsswitch.conf needs to be present to work around
 #   https://github.com/golang/go/issues/35305
 # drop this once we start building with Go 1.16
-RUN apk add --no-cache fuse3 git pigz xz \
+RUN apk add --no-cache fuse3 git openssh pigz xz \
   && ln -s fusermount3 /usr/bin/fusermount \
   && echo "hosts: files dns" >/etc/nsswitch.conf
 COPY examples/buildctl-daemonless/buildctl-daemonless.sh /usr/bin/
@@ -148,9 +147,10 @@ RUN --mount=from=containerd-src,src=/usr/src/containerd,readwrite --mount=target
   && make bin/ctr \
   && mv bin /out
 
-# containerd v1.3 for integration tests
+# containerd v1.4 for integration tests
 FROM containerd-base as containerd-alt
 ARG CONTAINERD_ALT_VERSION
+ARG GO111MODULE=off
 RUN --mount=from=containerd-src,src=/usr/src/containerd,readwrite --mount=target=/root/.cache,type=cache \
   git fetch origin \
   && git checkout -q "$CONTAINERD_ALT_VERSION" \
@@ -244,7 +244,7 @@ RUN apk add --no-cache shadow shadow-uidmap sudo vim iptables fuse \
   && ln -s /sbin/iptables-legacy /usr/bin/iptables \
   && xx-go --wrap
 # musl is needed to directly use the registry binary that is built on alpine
-ENV BUILDKIT_INTEGRATION_CONTAINERD_EXTRA="containerd-1.3=/opt/containerd-alt/bin"
+ENV BUILDKIT_INTEGRATION_CONTAINERD_EXTRA="containerd-1.4=/opt/containerd-alt/bin"
 ENV BUILDKIT_INTEGRATION_SNAPSHOTTER=stargz
 ENV CGO_ENABLED=0
 COPY --from=stargz-snapshotter /out/* /usr/bin/
@@ -282,7 +282,7 @@ RUN CC=$(xx-clang --print-target-triple)-clang ./autogen.sh --disable-nls --disa
 
 # Rootless mode.
 FROM alpine:${ALPINE_VERSION} AS rootless
-RUN apk add --no-cache fuse3 git xz pigz
+RUN apk add --no-cache fuse3 git openssh pigz xz
 COPY --from=idmap /usr/bin/newuidmap /usr/bin/newuidmap
 COPY --from=idmap /usr/bin/newgidmap /usr/bin/newgidmap
 COPY --from=fuse-overlayfs /out/fuse-overlayfs /usr/bin/

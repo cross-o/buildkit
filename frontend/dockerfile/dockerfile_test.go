@@ -109,6 +109,7 @@ var allTests = []integration.Test{
 	testDefaultShellAndPath,
 	testDockerfileLowercase,
 	testExportCacheLoop,
+	testWildcardRenameCache,
 }
 
 var fileOpTests = []integration.Test{
@@ -140,6 +141,9 @@ var securityTests = []integration.Test{}
 
 // Tests that depend on the `network.*` entitlements
 var networkTests = []integration.Test{}
+
+// Tests that depend on heredoc support
+var heredocTests = []integration.Test{}
 
 var opts []integration.TestOpt
 var securityOpts []integration.TestOpt
@@ -193,6 +197,7 @@ func TestIntegration(t *testing.T) {
 			"granted": networkHostGranted,
 			"denied":  networkHostDenied,
 		}))...)
+	integration.Run(t, heredocTests, opts...)
 }
 
 func testDefaultEnvWithArgs(t *testing.T, sb integration.Sandbox) {
@@ -3830,6 +3835,52 @@ LABEL foo=bar
 	v, ok = ociimg.Config.Labels["bar"]
 	require.True(t, ok)
 	require.Equal(t, "baz", v)
+}
+
+// #2008
+func testWildcardRenameCache(t *testing.T, sb integration.Sandbox) {
+	skipDockerd(t, sb)
+	f := getFrontend(t, sb)
+
+	dockerfile := []byte(`
+FROM alpine
+COPY file* /files/
+RUN ls /files/file1
+`)
+	dir, err := tmpdir(
+		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+		fstest.CreateFile("file1", []byte("foo"), 0600),
+	)
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+
+	c, err := client.New(context.TODO(), sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	destDir, err := ioutil.TempDir("", "buildkit")
+	require.NoError(t, err)
+	defer os.RemoveAll(destDir)
+
+	_, err = f.Solve(context.TODO(), c, client.SolveOpt{
+		LocalDirs: map[string]string{
+			builder.DefaultLocalNameDockerfile: dir,
+			builder.DefaultLocalNameContext:    dir,
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	err = os.Rename(filepath.Join(dir, "file1"), filepath.Join(dir, "file2"))
+	require.NoError(t, err)
+
+	// cache should be invalidated and build should fail
+	_, err = f.Solve(context.TODO(), c, client.SolveOpt{
+		LocalDirs: map[string]string{
+			builder.DefaultLocalNameDockerfile: dir,
+			builder.DefaultLocalNameContext:    dir,
+		},
+	}, nil)
+	require.Error(t, err)
 }
 
 func testOnBuildCleared(t *testing.T, sb integration.Sandbox) {
