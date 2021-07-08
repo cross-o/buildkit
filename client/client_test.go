@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -129,6 +130,7 @@ func TestIntegration(t *testing.T) {
 		testStargzLazyPull,
 		testFileOpInputSwap,
 		testRelativeMountpoint,
+		testLocalSourceDiffer,
 	}, mirrors)
 
 	integration.Run(t, []integration.Test{
@@ -677,7 +679,7 @@ func testSecurityModeSysfs(t *testing.T, sb integration.Sandbox) {
 
 	if secMode == securitySandbox {
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "executor failed running")
+		require.Contains(t, err.Error(), "did not complete successfully")
 		require.Contains(t, err.Error(), "mkdir /sys/fs/cgroup/cpuset/securitytest")
 	} else {
 		require.NoError(t, err)
@@ -1270,6 +1272,86 @@ func testFileOpInputSwap(t *testing.T, sb integration.Sandbox) {
 	_, err = c.Solve(sb.Context(), def, SolveOpt{}, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "bar: no such file")
+}
+
+func testLocalSourceDiffer(t *testing.T, sb integration.Sandbox) {
+	for _, d := range []llb.DiffType{llb.DiffNone, llb.DiffMetadata} {
+		t.Run(fmt.Sprintf("differ=%s", d), func(t *testing.T) {
+			testLocalSourceWithDiffer(t, sb, d)
+		})
+	}
+}
+
+func testLocalSourceWithDiffer(t *testing.T, sb integration.Sandbox, d llb.DiffType) {
+	requiresLinux(t)
+	c, err := New(context.TODO(), sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	dir, err := tmpdir(
+		fstest.CreateFile("foo", []byte("foo"), 0600),
+	)
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+
+	tv := syscall.NsecToTimespec(time.Now().UnixNano())
+
+	err = syscall.UtimesNano(filepath.Join(dir, "foo"), []syscall.Timespec{tv, tv})
+	require.NoError(t, err)
+
+	st := llb.Local("mylocal"+string(d), llb.Differ(d, false))
+
+	def, err := st.Marshal(context.TODO())
+	require.NoError(t, err)
+
+	destDir, err := ioutil.TempDir("", "buildkit")
+	require.NoError(t, err)
+	defer os.RemoveAll(destDir)
+
+	_, err = c.Solve(context.TODO(), def, SolveOpt{
+		Exports: []ExportEntry{
+			{
+				Type:      ExporterLocal,
+				OutputDir: destDir,
+			},
+		},
+		LocalDirs: map[string]string{
+			"mylocal" + string(d): dir,
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	dt, err := ioutil.ReadFile(filepath.Join(destDir, "foo"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("foo"), dt)
+
+	err = ioutil.WriteFile(filepath.Join(dir, "foo"), []byte("bar"), 0600)
+	require.NoError(t, err)
+
+	err = syscall.UtimesNano(filepath.Join(dir, "foo"), []syscall.Timespec{tv, tv})
+	require.NoError(t, err)
+
+	_, err = c.Solve(context.TODO(), def, SolveOpt{
+		Exports: []ExportEntry{
+			{
+				Type:      ExporterLocal,
+				OutputDir: destDir,
+			},
+		},
+		LocalDirs: map[string]string{
+			"mylocal" + string(d): dir,
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	dt, err = ioutil.ReadFile(filepath.Join(destDir, "foo"))
+	require.NoError(t, err)
+	if d == llb.DiffMetadata {
+		require.Equal(t, []byte("foo"), dt)
+	}
+	if d == llb.DiffNone {
+		require.Equal(t, []byte("bar"), dt)
+	}
 }
 
 func testFileOpRmWildcard(t *testing.T, sb integration.Sandbox) {
@@ -1968,6 +2050,22 @@ func testBuildExportWithUncompressed(t *testing.T, sb integration.Sandbox) {
 	}, nil)
 	require.NoError(t, err)
 
+	allCompressedTarget := registry + "/buildkit/build/exporter:withallcompressed"
+	_, err = c.Solve(context.TODO(), def, SolveOpt{
+		Exports: []ExportEntry{
+			{
+				Type: ExporterImage,
+				Attrs: map[string]string{
+					"name":              allCompressedTarget,
+					"push":              "true",
+					"compression":       "gzip",
+					"force-compression": "true",
+				},
+			},
+		},
+	}, nil)
+	require.NoError(t, err)
+
 	if cdAddress == "" {
 		t.Skip("rest of test requires containerd worker")
 	}
@@ -1976,9 +2074,12 @@ func testBuildExportWithUncompressed(t *testing.T, sb integration.Sandbox) {
 	require.NoError(t, err)
 	err = client.ImageService().Delete(ctx, compressedTarget, images.SynchronousDelete())
 	require.NoError(t, err)
+	err = client.ImageService().Delete(ctx, allCompressedTarget, images.SynchronousDelete())
+	require.NoError(t, err)
 
 	checkAllReleasable(t, c, sb, true)
 
+	// check if the new layer is compressed with compression option
 	img, err := client.Pull(ctx, compressedTarget)
 	require.NoError(t, err)
 
@@ -2003,6 +2104,51 @@ func testBuildExportWithUncompressed(t *testing.T, sb integration.Sandbox) {
 	require.NoError(t, err)
 
 	item, ok := m["data"]
+	require.True(t, ok)
+	require.Equal(t, int32(item.Header.Typeflag), tar.TypeReg)
+	require.Equal(t, []byte("uncompressed"), item.Data)
+
+	dt, err = content.ReadBlob(ctx, img.ContentStore(), ocispec.Descriptor{Digest: mfst.Layers[1].Digest})
+	require.NoError(t, err)
+
+	m, err = testutil.ReadTarToMap(dt, true)
+	require.NoError(t, err)
+
+	item, ok = m["data"]
+	require.True(t, ok)
+	require.Equal(t, int32(item.Header.Typeflag), tar.TypeReg)
+	require.Equal(t, []byte("gzip"), item.Data)
+
+	err = client.ImageService().Delete(ctx, compressedTarget, images.SynchronousDelete())
+	require.NoError(t, err)
+
+	checkAllReleasable(t, c, sb, true)
+
+	// check if all layers are compressed with force-compressoin option
+	img, err = client.Pull(ctx, allCompressedTarget)
+	require.NoError(t, err)
+
+	dt, err = content.ReadBlob(ctx, img.ContentStore(), img.Target())
+	require.NoError(t, err)
+
+	mfst = struct {
+		MediaType string `json:"mediaType,omitempty"`
+		ocispec.Manifest
+	}{}
+
+	err = json.Unmarshal(dt, &mfst)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(mfst.Layers))
+	require.Equal(t, images.MediaTypeDockerSchema2LayerGzip, mfst.Layers[0].MediaType)
+	require.Equal(t, images.MediaTypeDockerSchema2LayerGzip, mfst.Layers[1].MediaType)
+
+	dt, err = content.ReadBlob(ctx, img.ContentStore(), ocispec.Descriptor{Digest: mfst.Layers[0].Digest})
+	require.NoError(t, err)
+
+	m, err = testutil.ReadTarToMap(dt, true)
+	require.NoError(t, err)
+
+	item, ok = m["data"]
 	require.True(t, ok)
 	require.Equal(t, int32(item.Header.Typeflag), tar.TypeReg)
 	require.Equal(t, []byte("uncompressed"), item.Data)
@@ -3190,7 +3336,7 @@ func testReadonlyRootFS(t *testing.T, sb integration.Sandbox) {
 	// Would prefer to detect more specifically "Read-only file
 	// system" but that isn't exposed here (it is on the stdio
 	// which we don't see).
-	require.Contains(t, err.Error(), "executor failed running [/bin/touch /foo]:")
+	require.Contains(t, err.Error(), "process \"/bin/touch /foo\" did not complete successfully")
 
 	checkAllReleasable(t, c, sb, true)
 }

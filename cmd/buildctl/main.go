@@ -13,7 +13,9 @@ import (
 	"github.com/moby/buildkit/util/appdefaults"
 	"github.com/moby/buildkit/util/profiler"
 	"github.com/moby/buildkit/util/stack"
+	_ "github.com/moby/buildkit/util/tracing/detect/delegated"
 	_ "github.com/moby/buildkit/util/tracing/detect/jaeger"
+	_ "github.com/moby/buildkit/util/tracing/env"
 	"github.com/moby/buildkit/version"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
@@ -97,6 +99,8 @@ func main() {
 
 	app.Before = func(context *cli.Context) error {
 		debugEnabled = context.GlobalBool("debug")
+
+		logrus.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
 		if debugEnabled {
 			logrus.SetLevel(logrus.DebugLevel)
 		}

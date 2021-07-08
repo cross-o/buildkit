@@ -110,6 +110,7 @@ var allTests = []integration.Test{
 	testDockerfileLowercase,
 	testExportCacheLoop,
 	testWildcardRenameCache,
+	testDockerfileInvalidInstruction,
 }
 
 var fileOpTests = []integration.Test{
@@ -2149,7 +2150,38 @@ func testDockerfileInvalidCommand(t *testing.T, sb integration.Sandbox) {
 	err = cmd.Run()
 	require.Error(t, err)
 	require.Contains(t, stdout.String(), "/bin/sh -c invalidcmd")
-	require.Contains(t, stdout.String(), "executor failed running")
+	require.Contains(t, stdout.String(), "did not complete successfully")
+}
+
+func testDockerfileInvalidInstruction(t *testing.T, sb integration.Sandbox) {
+	skipDockerd(t, sb)
+	f := getFrontend(t, sb)
+	f.RequiresBuildctl(t)
+	dockerfile := []byte(`
+	FROM scratch
+	FNTRYPOINT ["/bin/sh", "-c", "echo invalidinstruction"]
+`)
+
+	dir, err := tmpdir(
+		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+	)
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+
+	c, err := client.New(sb.Context(), sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	_, err = f.Solve(sb.Context(), c, client.SolveOpt{
+		LocalDirs: map[string]string{
+			builder.DefaultLocalNameDockerfile: dir,
+			builder.DefaultLocalNameContext:    dir,
+		},
+	}, nil)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown instruction: FNTRYPOINT")
+	require.Contains(t, err.Error(), "did you mean ENTRYPOINT?")
 }
 
 func testDockerfileADDFromURL(t *testing.T, sb integration.Sandbox) {
