@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -98,7 +99,7 @@ func handleTarTypeBlockCharFifo(hdr *tar.Header, path string) error {
 	return nil
 }
 
-func handleLChmod(hdr *tar.Header, path string, hdrInfo os.FileInfo) error {
+func lchmod(path string, mode os.FileMode) error {
 	return nil
 }
 
